@@ -1,0 +1,6 @@
+{
+  "name": "Remix: Level Pack Master",
+  "description": "专业关卡图集打包工具，支持4-5-6循环打包、自动生成配置表及导出ZIP包。",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
