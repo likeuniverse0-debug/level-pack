@@ -294,7 +294,7 @@ export default function App() {
   const [plan, setPlan] = useState<LevelPlan[]>([]); 
   const [startLevel, setStartLevel] = useState(1);
   const [batchCount, setBatchCount] = useState(1);
-  const [themeGap, setThemeGap] = useState(5); 
+  const [categoryGap, setCategoryGap] = useState(5); 
   const [activeTab, setActiveTab] = useState<'upload' | 'categorization' | 'properties' | 'sequence' | 'pack'>('upload');
   const [isGenerating, setIsGenerating] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
@@ -303,8 +303,6 @@ export default function App() {
   const [selectedAssetIdsForTagging, setSelectedAssetIdsForTagging] = useState<string[]>([]);
   
   // Ratio / Weight States
-  const [sizeRatio4, setSizeRatio4] = useState(2); // Default 2 parts 4x4
-  const [sizeRatio6, setSizeRatio6] = useState(1); // Default 1 part 6x6
   const [satWeights, setSatWeights] = useState<Record<string, number>>({
     "高": 40,
     "中": 40,
@@ -506,12 +504,6 @@ export default function App() {
 
       const usedAssetIds = new Set<string>();
 
-      // Pre-build the size cycle based on user ratios
-      const sizeCycle: (4|6)[] = [];
-      const totalRatio = sizeRatio4 + sizeRatio6;
-      for (let i = 0; i < sizeRatio4; i++) sizeCycle.push(4);
-      for (let i = 0; i < sizeRatio6; i++) sizeCycle.push(6);
-
       // Pre-build saturation goal for the current batch (just use probability)
       const getDesiredSat = () => {
         const rand = Math.random() * 100;
@@ -528,34 +520,53 @@ export default function App() {
         const targetSize = ([4, 4, 6] as (4|6)[])[levelsCreated % 3];
         const desiredSat = getDesiredSat();
         
+        // Track recent categories to avoid repeats within the gap
+        const recentCategories = new Set(
+          tempPlan.slice(Math.max(0, tempPlan.length - categoryGap))
+            .map(p => p.asset.category)
+            .filter(Boolean)
+        );
+
         let selectedAsset: Asset | null = null;
 
-        // Try prioritized selection: matching size AND saturation
+        // Try prioritized selection: matching size AND saturation AND checking category gap
         const bestMatches = assets.filter(a => 
           a.pieceSize === targetSize && 
           (!desiredSat || a.saturation === desiredSat) && 
-          !usedAssetIds.has(a.id)
+          !usedAssetIds.has(a.id) &&
+          (!a.category || !recentCategories.has(a.category))
         );
 
         if (bestMatches.length > 0) {
           selectedAsset = bestMatches[Math.floor(Math.random() * bestMatches.length)];
         } else {
-          // Relax saturation requirement
+          // Relax saturation requirement but still check category gap
           const sizeMatches = assets.filter(a => 
             a.pieceSize === targetSize && 
-            !usedAssetIds.has(a.id)
+            !usedAssetIds.has(a.id) &&
+            (!a.category || !recentCategories.has(a.category))
           );
           
           if (sizeMatches.length > 0) {
             selectedAsset = sizeMatches[Math.floor(Math.random() * sizeMatches.length)];
           } else {
-            // Last resort: Fallback to other allowed size
-            const otherSize = targetSize === 4 ? 6 : 4;
-            const fallbackMatches = assets.filter(a => a.pieceSize === otherSize && !usedAssetIds.has(a.id));
-            if (fallbackMatches.length > 0) {
-              selectedAsset = fallbackMatches[Math.floor(Math.random() * fallbackMatches.length)];
+            // Relax category gap as well
+            const forcedMatches = assets.filter(a => 
+              a.pieceSize === targetSize && 
+              !usedAssetIds.has(a.id)
+            );
+
+            if (forcedMatches.length > 0) {
+              selectedAsset = forcedMatches[Math.floor(Math.random() * forcedMatches.length)];
             } else {
-              break; 
+              // Last resort: Fallback to other allowed size
+              const otherSize = targetSize === 4 ? 6 : 4;
+              const fallbackMatches = assets.filter(a => a.pieceSize === otherSize && !usedAssetIds.has(a.id));
+              if (fallbackMatches.length > 0) {
+                selectedAsset = fallbackMatches[Math.floor(Math.random() * fallbackMatches.length)];
+              } else {
+                break; 
+              }
             }
           }
         }
@@ -587,7 +598,7 @@ export default function App() {
     } finally {
       setIsGenerating(false);
     }
-  }, [assets, batchCount, startLevel, isGenerating, buildFileName, sizeRatio4, sizeRatio6, satWeights]);
+  }, [assets, batchCount, startLevel, isGenerating, buildFileName, satWeights, categoryGap]);
 
   const exportZip = useCallback(async () => {
     if (plan.length === 0 || isZipping) return;
@@ -1282,18 +1293,17 @@ export default function App() {
                     </div>
 
                       <div className="space-y-4 pt-4 border-t border-white/10">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-[#F27D26]">规格配比权重 (Size Ratio)</label>
-                        <div className="grid grid-cols-2 gap-4">
-                           <div className="space-y-1">
-                             <div className="flex justify-between text-[8px] font-bold text-white/40 uppercase"><span>4X4 比重</span><span>{sizeRatio4}</span></div>
-                             <input type="range" min="1" max="10" value={sizeRatio4} onChange={e => setSizeRatio4(parseInt(e.target.value))} className="w-full h-1 bg-gray-700 rounded-full accent-white" />
+                        <label className="text-[10px] font-black uppercase tracking-widest text-[#F27D26]">规格序列规则 (Sequence Rule)</label>
+                        <div className="bg-white/5 p-4 rounded-2xl border border-white/5">
+                           <div className="flex items-center gap-2 mb-2">
+                             <div className="px-2 py-1 bg-[#F27D26] text-white text-[10px] font-black rounded-lg">4x4</div>
+                             <ArrowRight className="w-3 h-3 text-white/20" />
+                             <div className="px-2 py-1 bg-[#F27D26] text-white text-[10px] font-black rounded-lg">4x4</div>
+                             <ArrowRight className="w-3 h-3 text-white/20" />
+                             <div className="px-2 py-1 bg-white text-[#1A1A1A] text-[10px] font-black rounded-lg">6x6</div>
                            </div>
-                           <div className="space-y-1">
-                             <div className="flex justify-between text-[8px] font-bold text-white/40 uppercase"><span>6X6 比重</span><span>{sizeRatio6}</span></div>
-                             <input type="range" min="1" max="10" value={sizeRatio6} onChange={e => setSizeRatio6(parseInt(e.target.value))} className="w-full h-1 bg-gray-700 rounded-full accent-[#F27D26]" />
-                           </div>
+                           <p className="text-[9px] text-white/40 leading-relaxed italic">当前已锁定为固定的 [4x4 → 4x4 → 6x6] 循环序列，无需手动配置比重。</p>
                         </div>
-                        <p className="text-[9px] text-white/20 italic">当前比例: {sizeRatio4} : {sizeRatio6} (平均每 {(sizeRatio4+sizeRatio6)} 关出现 {sizeRatio6} 个 6x6)</p>
                       </div>
 
                       <div className="space-y-4 pt-4 border-t border-white/10">
@@ -1333,12 +1343,12 @@ export default function App() {
                         <input type="number" value={batchCount} onChange={e => setBatchCount(parseInt(e.target.value) || 1)} className="w-full bg-white border border-gray-200 p-5 rounded-2xl font-mono font-bold text-3xl shadow-inner focus:border-[#1A1A1A] outline-none transition-colors" />
                       </div>
                       <div className="space-y-2">
-                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">同主题回避间隔 (关)</label>
+                        <label className="text-[10px] font-black uppercase tracking-widest text-gray-400">同品类回避间隔 (关)</label>
                         <div className="flex items-center gap-4">
-                           <input type="range" min="0" max="100" value={themeGap} onChange={e => setThemeGap(parseInt(e.target.value) || 0)} className="flex-1 h-2 bg-gray-200 rounded-full accent-[#1A1A1A]" />
-                           <span className="font-mono font-bold text-xl w-10 text-right">{themeGap}</span>
+                           <input type="range" min="0" max="100" value={categoryGap} onChange={e => setCategoryGap(parseInt(e.target.value) || 0)} className="flex-1 h-2 bg-gray-200 rounded-full accent-[#1A1A1A]" />
+                           <span className="font-mono font-bold text-xl w-10 text-right">{categoryGap}</span>
                         </div>
-                        <p className="text-[9px] text-gray-400 font-medium">设置连续多少关内不出现同一主题图</p>
+                        <p className="text-[9px] text-gray-400 font-medium">设置连续多少关内不出现同一品类图</p>
                       </div>
                       <button 
                         onClick={generatePlan} 
