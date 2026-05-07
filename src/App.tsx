@@ -296,6 +296,13 @@ export default function App() {
   const [batchCount, setBatchCount] = useState(1);
   const [categoryGap, setCategoryGap] = useState(5); 
   const [activeTab, setActiveTab] = useState<'upload' | 'categorization' | 'properties' | 'sequence' | 'pack'>('upload');
+  const [namingScheme, setNamingScheme] = useState([
+    { id: 'seq', label: '关卡序列', enabled: true },
+    { id: 'cat', label: '品类(EN)', enabled: true },
+    { id: 'sat', label: '饱和度', enabled: false },
+    { id: 'diff', label: '难度', enabled: false },
+    { id: 'name', label: '原文件名', enabled: true },
+  ]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isZipping, setIsZipping] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -318,28 +325,33 @@ export default function App() {
 
   // Helper: Build the complete file name according to user priority rules
   const buildFileName = useCallback((lNo: number, pSize: number, asset: Asset) => {
-    const seqPrefix = `${lNo}_piece${pSize}`;
-    const cleanOriginal = sanitizeFileName(asset.name.split('.')[0]);
-    
-    let fileName = `${seqPrefix}_${cleanOriginal}`;
-    
-    if (asset.category) {
-      const catEng = CATEGORY_MAP[asset.category] || `custom_${sanitizeFileName(asset.category).toLowerCase()}`;
-      fileName += `_${catEng}`;
-    }
-    
-    if (asset.saturation) {
-      const satEng = SATURATION_MAP[asset.saturation];
-      if (satEng) fileName += `_${satEng}`;
-    }
+    const components = namingScheme.filter(c => c.enabled);
+    const parts: string[] = [];
 
-    if (asset.difficulty) {
-      const diffEng = DIFFICULTY_MAP[asset.difficulty];
-      if (diffEng) fileName += `_${diffEng}`;
-    }
-    
-    return fileName;
-  }, []);
+    components.forEach(comp => {
+      if (comp.id === 'seq') {
+        parts.push(`${lNo}_piece${pSize}`);
+      } else if (comp.id === 'cat') {
+        const catName = asset.category || "none";
+        const catEng = CATEGORY_MAP[catName] || `custom_${sanitizeFileName(catName).toLowerCase()}`;
+        parts.push(catEng);
+      } else if (comp.id === 'name') {
+        parts.push(sanitizeFileName(asset.name.split('.')[0]));
+      } else if (comp.id === 'sat') {
+        if (asset.saturation) {
+          const satEng = SATURATION_MAP[asset.saturation];
+          if (satEng) parts.push(satEng);
+        }
+      } else if (comp.id === 'diff') {
+        if (asset.difficulty) {
+          const diffEng = DIFFICULTY_MAP[asset.difficulty];
+          if (diffEng) parts.push(diffEng);
+        }
+      }
+    });
+
+    return parts.join('_').replace(/_+/g, "_");
+  }, [namingScheme]);
 
   // Re-calculate the plan sequence (IDs and indices) whenever the plan array changes its order
   const reindexPlan = useCallback((newPlan: LevelPlan[]) => {
@@ -359,6 +371,25 @@ export default function App() {
   const onPlanOrderChange = (newOrder: LevelPlan[]) => {
     setPlan(reindexPlan(newOrder));
   };
+
+  // Keep plan pic_ids in sync with namingScheme or startLevel changes
+  // We avoid infinite loop by not including 'plan' as a dependency directly
+  // unless we are sure setPlan doesn't trigger it again.
+  // Actually, reindexPlan is stable unless buildFileName/startLevel change.
+  const prevSchemeRef = useRef(JSON.stringify(namingScheme));
+  const prevStartLevelRef = useRef(startLevel);
+
+  if (prevSchemeRef.current !== JSON.stringify(namingScheme) || prevStartLevelRef.current !== startLevel) {
+    if (plan.length > 0) {
+      const updated = reindexPlan(plan);
+      // We check if it actually changed to avoid redundant sets
+      if (JSON.stringify(updated.map(p => p.pic_id)) !== JSON.stringify(plan.map(p => p.pic_id))) {
+        setPlan(updated);
+      }
+    }
+    prevSchemeRef.current = JSON.stringify(namingScheme);
+    prevStartLevelRef.current = startLevel;
+  }
 
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -1331,6 +1362,45 @@ export default function App() {
                            ))}
                         </div>
                         <p className="text-[9px] text-white/20 italic">选片时将尽可能按此权重优先筛选对应标注的素材</p>
+                      </div>
+
+                      <div className="space-y-4 pt-4 border-t border-white/10">
+                        <label className="text-[10px] font-black uppercase tracking-widest text-[#F27D26]">文件名构造规则 (Naming Scheme)</label>
+                        <div className="space-y-3 p-4 bg-black/40 rounded-3xl border border-white/5 shadow-inner">
+                          <Reorder.Group axis="y" values={namingScheme} onReorder={setNamingScheme} className="space-y-2">
+                            {namingScheme.map((item) => (
+                              <Reorder.Item 
+                                key={item.id} 
+                                value={item}
+                                className={`p-3 rounded-xl border flex items-center justify-between transition-all select-none ${
+                                  item.enabled 
+                                    ? 'bg-white/5 border-white/20 shadow-lg' 
+                                    : 'bg-black/20 border-white/5 opacity-40 grayscale'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-6 h-6 rounded-lg bg-white/5 flex items-center justify-center cursor-grab active:cursor-grabbing hover:bg-white/10 transition-colors">
+                                    <GripVertical className="w-3.5 h-3.5 text-white/40" />
+                                  </div>
+                                  <span className={`text-xs font-bold ${item.enabled ? 'text-white' : 'text-white/40'}`}>{item.label}</span>
+                                </div>
+                                <button 
+                                  onClick={() => setNamingScheme(prev => prev.map(c => c.id === item.id ? { ...c, enabled: !c.enabled } : c))}
+                                  className={`w-8 h-4 rounded-full relative transition-all duration-300 ${item.enabled ? 'bg-[#F27D26]' : 'bg-gray-800'}`}
+                                >
+                                  <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all duration-300 ${item.enabled ? 'right-0.5 shadow-[0_0_8px_rgba(242,125,38,0.8)]' : 'left-0.5'}`} />
+                                </button>
+                              </Reorder.Item>
+                            ))}
+                          </Reorder.Group>
+                          
+                          <div className="bg-white/5 p-3 rounded-xl border border-dashed border-white/10">
+                            <div className="text-[7px] font-black text-white/40 uppercase mb-1.5 tracking-tighter">导出示例 (Export Sample)</div>
+                            <div className="text-[10px] font-mono font-medium text-[#F27D26] break-all leading-tight bg-black/20 p-2 rounded-lg border border-black/40 shadow-inner">
+                              {buildFileName(1, 4, { name: 'landscape', category: '自然景观', saturation: '高' } as any)}.png
+                            </div>
+                          </div>
+                        </div>
                       </div>
 
                       <div className="space-y-6 pt-4 border-t border-white/10">
