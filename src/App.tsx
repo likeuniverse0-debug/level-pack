@@ -75,6 +75,101 @@ const DIFFICULTY_MAP: Record<string, string> = {
   "困难": "hard"
 };
 
+// --- Helper: Image Processing & Learning ---
+
+const calculateImageSaturation = (file: File): Promise<'高' | '中' | '低'> => {
+  return new Promise((resolve) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const size = 50; 
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve('中');
+        return;
+      }
+      ctx.drawImage(img, 0, 0, size, size);
+      const data = ctx.getImageData(0, 0, size, size).data;
+      
+      let totalS = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i] / 255;
+        const g = data[i+1] / 255;
+        const b = data[i+2] / 255;
+        
+        const max = Math.max(r, g, b);
+        const min = Math.min(r, g, b);
+        const diff = max - min;
+        const l = (max + min) / 2;
+        
+        let s = 0;
+        if (diff !== 0) {
+          s = l > 0.5 ? diff / (2 - max - min) : diff / (max + min);
+        }
+        totalS += s;
+      }
+      
+      const avgS = totalS / (size * size);
+      if (avgS < 0.22) resolve('低'); // Adjusted thresholds
+      else if (avgS > 0.52) resolve('高');
+      else resolve('中');
+      
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve('中');
+    };
+    img.src = url;
+  });
+};
+
+const KEYWORD_STYLE_KEY = 'ais_keyword_style_weights';
+const learnFromMapping = (subCategory: string, fileName: string, tags: string[] = []) => {
+  try {
+    const weightsRaw = localStorage.getItem(KEYWORD_STYLE_KEY);
+    const weights: Record<string, Record<string, number>> = weightsRaw ? JSON.parse(weightsRaw) : {};
+    
+    // Extract potential keywords from filename and tags
+    const cleanFn = fileName.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, ' ');
+    const keywords = new Set([...cleanFn.split(/\s+/), ...tags.map(t => t.toLowerCase())]);
+    
+    keywords.forEach(kw => {
+      if (kw.length < 2) return;
+      if (!weights[kw]) weights[kw] = {};
+      weights[kw][subCategory] = (weights[kw][subCategory] || 0) + 1;
+    });
+    
+    localStorage.setItem(KEYWORD_STYLE_KEY, JSON.stringify(weights));
+  } catch (e) { console.error('Learning failed', e); }
+};
+
+const predictStyle = (fileName: string, tags: string[] = []): string | null => {
+  try {
+    const weightsRaw = localStorage.getItem(KEYWORD_STYLE_KEY);
+    if (!weightsRaw) return null;
+    const weights: Record<string, Record<string, number>> = JSON.parse(weightsRaw);
+    
+    const cleanFn = fileName.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]/g, ' ');
+    const keywords = new Set([...cleanFn.split(/\s+/), ...tags.map(t => t.toLowerCase())]);
+    
+    const candidates: Record<string, number> = {};
+    keywords.forEach(kw => {
+      if (weights[kw]) {
+        Object.entries(weights[kw]).forEach(([style, count]) => {
+          candidates[style] = (candidates[style] || 0) + count;
+        });
+      }
+    });
+    
+    const sorted = Object.entries(candidates).sort((a, b) => b[1] - a[1]);
+    return sorted.length > 0 ? sorted[0][0] : null;
+  } catch (e) { return null; }
+};
+
 // --- Types ---
 
 interface AssetHistory {
@@ -591,11 +686,13 @@ export default function App() {
     setPendingBatches(prev => prev.filter(b => b.id !== id));
   };
 
-  const importAllBatches = () => {
-    pendingBatches.forEach(b => confirmImport(b));
+  const importAllBatches = async () => {
+    for (const b of pendingBatches) {
+      await confirmImport(b);
+    }
   };
 
-  const confirmImport = (batch: PendingBatch) => {
+  const confirmImport = async (batch: PendingBatch) => {
     const shuffledFiles = shuffle([...batch.files]);
     const selectedFiles = shuffledFiles.slice(0, batch.limit);
     const metaMap = (batch as any).metaMap || {};
@@ -606,7 +703,7 @@ export default function App() {
 
     const detectedStyles = new Set<string>();
     
-    const newAssets: Asset[] = selectedFiles.map(file => {
+    const newAssets: Asset[] = await Promise.all(selectedFiles.map(async file => {
       const fileName = file.name;
       const fileSize = file.size;
       const historyKey = `${fileName}_${fileSize}`;
@@ -625,6 +722,19 @@ export default function App() {
       let subCategory: string | undefined = savedMeta?.subCategory;
       let saturation: string | undefined = savedMeta?.saturation;
       let hasAutoMeta = !!savedMeta;
+
+      const tags: string[] = (meta as any)?.tags || [];
+
+      // 2. If no saved meta, try Smart Prediction (Learning from previous batches)
+      if (!savedMeta && !subCategory) {
+        const predicted = predictStyle(fileName, tags);
+        if (predicted) {
+          subCategory = predicted;
+          hasAutoMeta = true;
+          // If we predicted subCategory, we can often infer category too
+          if (INITIAL_TAG_MAP[subCategory]) category = INITIAL_TAG_MAP[subCategory];
+        }
+      }
 
       // 强化版匹配逻辑：全字典扫描 (Only if no saved meta)
       if (!savedMeta) {
@@ -668,47 +778,37 @@ export default function App() {
             if (sl.includes('高')) saturation = '高';
             else if (sl.includes('低')) saturation = '低';
             else saturation = '中';
-          } else {
-            const aiStyleStr = matchingMeta.ai_analysis?.style || "";
-            const aiDescStr = matchingMeta.ai_analysis?.description || "";
-            const combinedStyleInfo = (aiStyleStr + aiDescStr).toLowerCase();
-            if (combinedStyleInfo.includes("high-saturation") || combinedStyleInfo.includes("高饱和") || combinedStyleInfo.includes("鲜艳")) {
-              saturation = "高";
-            } else if (combinedStyleInfo.includes("low-saturation") || combinedStyleInfo.includes("低饱和") || combinedStyleInfo.includes("淡雅") || combinedStyleInfo.includes("柔和")) {
-              saturation = "低";
-            } else {
-              saturation = "中";
-            }
           }
 
           // 4. 品类与标签
-          const tags: string[] = matchingMeta.tags || [];
+          const mTags: string[] = matchingMeta.tags || [];
           const styleKeywords = ["摄影", "油画", "水彩", "3D", "动漫", "二次元", "极简", "像素", "写实", "中国风", "剪纸", "复古", "梦幻", "纪实", "特写", "特写摄影"];
           const aiInfo = `${matchingMeta.ai_analysis?.description || ''} ${matchingMeta.ai_analysis?.style || ''}`.toLowerCase();
           
-          subCategory = tags.find(t => styleKeywords.some(s => t.includes(s)));
           if (!subCategory) {
-            subCategory = styleKeywords.find(s => aiInfo.includes(s.toLowerCase()));
+            subCategory = mTags.find(t => styleKeywords.some(s => t.includes(s)));
+            if (!subCategory) {
+              subCategory = styleKeywords.find(s => aiInfo.includes(s.toLowerCase()));
+            }
           }
           if (subCategory) detectedStyles.add(subCategory);
 
           // 优先从元数据的大类字段识别
           const metaCat = matchingMeta.category;
-          if (metaCat) {
+          if (metaCat && !category) {
             const foundKey = Object.keys(CATEGORY_MAP).find(k => 
               k === metaCat || CATEGORY_MAP[k] === metaCat || metaCat.includes(k)
             );
-            category = foundKey;
+            if (foundKey) category = foundKey;
           }
 
           // 如果没识别到，尝试从标签映射
-          if (!category && tags.length > 0) {
-            for (const tag of tags) {
+          if (!category && mTags.length > 0) {
+            for (const tag of mTags) {
               if (INITIAL_TAG_MAP[tag]) {
                 category = INITIAL_TAG_MAP[tag];
                 break;
               }
-              // 模糊匹配标签
               const matchedTag = Object.keys(INITIAL_TAG_MAP).find(k => tag.includes(k));
               if (matchedTag) {
                 category = INITIAL_TAG_MAP[matchedTag];
@@ -717,6 +817,11 @@ export default function App() {
             }
           }
         }
+      }
+
+      // NO META / FALLBACK SATURATION DETECTION
+      if (!saturation) {
+        saturation = await calculateImageSaturation(file);
       }
 
       // 5. 路径兜底与 Mapping 反推
@@ -762,9 +867,9 @@ export default function App() {
   previewUrl: URL.createObjectURL(file), // Add this line
         saturation,
         hasAutoMeta,
-        tags: (matchingMeta as any)?.tags || []
+        tags: tags
       };
-    });
+    }));
 
     if (detectedStyles.size > 0) {
       setCustomCategories(prev => {
@@ -778,6 +883,13 @@ export default function App() {
 
     setAssets(prev => [...prev, ...newAssets]);
     setPendingBatches(prev => prev.filter(b => b.id !== batch.id));
+
+    // Learn from newly imported assets if they have subCategory
+    newAssets.forEach(a => {
+      if (a.subCategory) {
+        learnFromMapping(a.subCategory, a.file.name, a.tags);
+      }
+    });
   };
 
   useEffect(() => {
@@ -804,6 +916,11 @@ export default function App() {
           difficulty: affectedAsset.difficulty,
         };
         localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+
+        // LEARN from manual update
+        if (props.subCategory) {
+          learnFromMapping(props.subCategory, affectedAsset.file.name, affectedAsset.tags);
+        }
       }
       
       return newAssets;
